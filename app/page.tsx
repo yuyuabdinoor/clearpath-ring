@@ -19,6 +19,12 @@ import {
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
 type DrawMode = 'zone' | 'object'
+type CapturedFrame = {
+  url: string
+  capturedAt: number
+  width: number
+  height: number
+}
 
 const statePresentation: Record<AccessState, { label: string; color: string; background: string }> = {
   zone_clear: { label: 'ZONE CLEAR', color: 'text-emerald-200', background: 'bg-emerald-500/15 border-emerald-400/40' },
@@ -42,6 +48,8 @@ export default function Dashboard() {
   const [occluded, setOccluded] = useState(false)
   const [cameraAvailable, setCameraAvailable] = useState(true)
   const [observedAt, setObservedAt] = useState(Date.now())
+  const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
+  const [captureError, setCaptureError] = useState<string | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -143,6 +151,44 @@ export default function Dashboard() {
       setObservedAt(Date.now())
     }
   }
+
+  const captureFrame = () => {
+    const video = videoRef.current
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
+      setCaptureError('Start the Ring stream and wait for a usable video frame.')
+      return
+    }
+
+    const captureCanvas = document.createElement('canvas')
+    captureCanvas.width = video.videoWidth
+    captureCanvas.height = video.videoHeight
+    const context = captureCanvas.getContext('2d')
+    if (!context) {
+      setCaptureError('The browser could not create a frame-capture context.')
+      return
+    }
+
+    context.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height)
+    captureCanvas.toBlob((blob) => {
+      if (!blob) {
+        setCaptureError('The current Ring frame could not be captured.')
+        return
+      }
+
+      const capturedAt = Date.now()
+      const url = URL.createObjectURL(blob)
+      setCapturedFrame((previous) => {
+        if (previous) URL.revokeObjectURL(previous.url)
+        return { url, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
+      })
+      setObservedAt(capturedAt)
+      setCaptureError(null)
+    }, 'image/jpeg', 0.9)
+  }
+
+  useEffect(() => () => {
+    if (capturedFrame) URL.revokeObjectURL(capturedFrame.url)
+  }, [capturedFrame])
 
   // Loading state
   if (loading) {
@@ -278,6 +324,27 @@ export default function Dashboard() {
               <div className="mt-1 flex justify-between text-xs text-slate-400">
                 <span>Object overlap</span>
                 <span>{Math.round(decision.overlapRatio * 100)}%</span>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white">Ring evidence</p>
+                <p className="mt-1 text-xs text-slate-400">Captured locally from the active WHEP video element.</p>
+              </div>
+              <button onClick={captureFrame} disabled={!streamActive} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">Capture frame</button>
+            </div>
+            {captureError && <p className="mt-3 text-xs text-rose-300">{captureError}</p>}
+            {capturedFrame && (
+              <div className="mt-3 overflow-hidden rounded-lg border border-slate-700 bg-black">
+                {/* Blob URL exists only in this browser session and is revoked when replaced. */}
+                <img src={capturedFrame.url} alt="Latest transient Ring evidence frame" className="aspect-video w-full object-contain" />
+                <div className="flex justify-between px-3 py-2 text-[11px] text-slate-400">
+                  <span>{capturedFrame.width} × {capturedFrame.height}</span>
+                  <span>{new Date(capturedFrame.capturedAt).toLocaleTimeString()}</span>
+                </div>
               </div>
             )}
           </section>
