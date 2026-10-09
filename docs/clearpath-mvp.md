@@ -13,6 +13,8 @@ ClearPath monitors a resident-defined access zone at an entrance. It reports wha
 
 The visual model may identify a newly visible movable object, return its bounds or mask, report confidence, and flag occlusion. Deterministic application code stores the resident's protected zone, computes overlap, applies freshness and confidence policy, controls state transitions, deduplicates alerts, and enforces retention.
 
+Localization output is accepted only through a strict schema: supported observable category, normalized in-frame bounds, confidence between zero and one, occlusion flag, and the timestamp of the exact source frame. Invalid model output never reaches geometry and becomes `REVIEW NEEDED`.
+
 The application never infers visitor identity, intent, disability, legal compliance, or whether a person can physically maneuver around an object.
 
 ## Evidence policy
@@ -30,4 +32,3 @@ The application never infers visitor identity, intent, disability, legal complia
 - After the stream completed, Event History contained a new `on_demand` event spanning the current session.
 - The simulator therefore supports a real Ring-driven demo and a metadata-to-live-evidence loop.
 - Snapshot and clip retrieval against the Playground device remain unverified; WHEP frame capture is the approved MVP path.
-
