@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, PointerEvent } from 'react'
 import { useVideoProcessing } from '@/lib/video-processors/useVideoProcessing'
 import '@/lib/video-processors' // Register built-in processors
 
@@ -10,9 +10,22 @@ import { ProcessorPanel } from './components/ProcessorPanel'
 import { useWebRTCStream } from './hooks/useWebRTCStream'
 import { useEventStream } from './hooks/useEventStream'
 import { useCanvasOverlay } from './hooks/useCanvasOverlay'
+import {
+  AccessState,
+  NormalizedRect,
+  decideAccessState,
+} from '@/lib/clearpath/decision'
 
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
+type DrawMode = 'zone' | 'object'
+
+const statePresentation: Record<AccessState, { label: string; color: string; background: string }> = {
+  zone_clear: { label: 'ZONE CLEAR', color: 'text-emerald-200', background: 'bg-emerald-500/15 border-emerald-400/40' },
+  obstruction_detected: { label: 'OBSTRUCTION DETECTED', color: 'text-rose-200', background: 'bg-rose-500/15 border-rose-400/40' },
+  review_needed: { label: 'REVIEW NEEDED', color: 'text-amber-200', background: 'bg-amber-500/15 border-amber-400/40' },
+  camera_unavailable: { label: 'CAMERA UNAVAILABLE', color: 'text-slate-200', background: 'bg-slate-500/15 border-slate-400/40' },
+}
 
 export default function Dashboard() {
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>('events')
@@ -22,6 +35,14 @@ export default function Dashboard() {
   const [authMode, setAuthMode] = useState<AuthMode>(null)
   const [authError, setAuthError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [drawMode, setDrawMode] = useState<DrawMode>('zone')
+  const [protectedZone, setProtectedZone] = useState<NormalizedRect>({ x: 0.18, y: 0.5, width: 0.38, height: 0.42 })
+  const [objectBox, setObjectBox] = useState<NormalizedRect | null>(null)
+  const [objectConfidence, setObjectConfidence] = useState(0.92)
+  const [occluded, setOccluded] = useState(false)
+  const [cameraAvailable, setCameraAvailable] = useState(true)
+  const [observedAt, setObservedAt] = useState(Date.now())
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -76,6 +97,53 @@ export default function Dashboard() {
 
   const isSimpleMode = authMode === 'access_token'
 
+  const decision = useMemo(() => decideAccessState({
+    observedAt,
+    cameraAvailable: cameraAvailable && streamActive,
+    object: objectBox,
+    objectConfidence,
+    occluded,
+  }, {
+    protectedZone,
+    minimumObjectConfidence: 0.7,
+    minimumOverlapRatio: 0.1,
+    maximumEvidenceAgeMs: 60_000,
+  }), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, protectedZone, streamActive])
+
+  const presentation = statePresentation[decision.state]
+
+  const normalizedPoint = (event: PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height)),
+    }
+  }
+
+  const beginDrawing = (event: PointerEvent<HTMLDivElement>) => {
+    dragStartRef.current = normalizedPoint(event)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const finishDrawing = (event: PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current
+    if (!start) return
+    const end = normalizedPoint(event)
+    const rect = {
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    }
+    dragStartRef.current = null
+    if (rect.width < 0.015 || rect.height < 0.015) return
+    if (drawMode === 'zone') setProtectedZone(rect)
+    else {
+      setObjectBox(rect)
+      setObservedAt(Date.now())
+    }
+  }
+
   // Loading state
   if (loading) {
     return (
@@ -107,11 +175,47 @@ export default function Dashboard() {
 
       {/* Main content */}
       <div className="flex-1 flex min-h-0">
-        {/* Video section — full width in simple mode, 60% in full mode */}
-        <div className={`${isSimpleMode ? 'w-full' : 'w-[60%]'} p-4 flex flex-col`}>
+        <div className="w-[66%] p-4 flex flex-col">
           <div className="relative flex-1 bg-black rounded-xl overflow-hidden">
             <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+            <div
+              className="absolute inset-0 cursor-crosshair touch-none"
+              onPointerDown={beginDrawing}
+              onPointerUp={finishDrawing}
+              aria-label={`Draw ${drawMode === 'zone' ? 'protected zone' : 'debug object box'}`}
+            >
+              <div
+                className="absolute border-2 border-cyan-300 bg-cyan-300/15"
+                style={{
+                  left: `${protectedZone.x * 100}%`,
+                  top: `${protectedZone.y * 100}%`,
+                  width: `${protectedZone.width * 100}%`,
+                  height: `${protectedZone.height * 100}%`,
+                }}
+              >
+                <span className="absolute -top-7 left-0 rounded bg-cyan-950/90 px-2 py-1 text-[11px] font-semibold text-cyan-100">
+                  Resident-defined access zone
+                </span>
+              </div>
+
+              {objectBox && (
+                <div
+                  className="absolute border-2 border-amber-300 bg-amber-300/15"
+                  style={{
+                    left: `${objectBox.x * 100}%`,
+                    top: `${objectBox.y * 100}%`,
+                    width: `${objectBox.width * 100}%`,
+                    height: `${objectBox.height * 100}%`,
+                  }}
+                >
+                  <span className="absolute -top-7 right-0 rounded bg-amber-950/90 px-2 py-1 text-[11px] font-semibold text-amber-100">
+                    Debug object · {Math.round(objectConfidence * 100)}%
+                  </span>
+                </div>
+              )}
+            </div>
 
             {!streamActive && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
@@ -156,9 +260,50 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Right panel — only shown in refresh_token (full) mode */}
-        {!isSimpleMode && (
-          <div className="w-[40%] border-l border-slate-700 flex flex-col">
+        <aside className="w-[34%] border-l border-slate-700 bg-slate-950/45 p-5 overflow-y-auto">
+          <div className="mb-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">ClearPath calibration</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white">Is the resident&apos;s route clear?</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-400">Draw normalized evidence regions over the real Ring stream. Manual object boxes are visibly labeled debug instrumentation.</p>
+          </div>
+
+          <section className={`rounded-xl border p-4 ${presentation.background}`}>
+            <p className={`text-lg font-bold ${presentation.color}`}>{presentation.label}</p>
+            <p className="mt-2 text-sm leading-5 text-slate-200">{decision.reason}</p>
+            <div className="mt-3 flex justify-between text-xs text-slate-400">
+              <span>Latest evidence</span>
+              <span>{new Date(decision.observedAt).toLocaleTimeString()}</span>
+            </div>
+            {decision.overlapRatio !== null && (
+              <div className="mt-1 flex justify-between text-xs text-slate-400">
+                <span>Object overlap</span>
+                <span>{Math.round(decision.overlapRatio * 100)}%</span>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+            <p className="text-sm font-semibold text-white">Calibration tools</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button onClick={() => setDrawMode('zone')} className={`rounded-lg px-3 py-2 text-sm ${drawMode === 'zone' ? 'bg-cyan-300 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Draw access zone</button>
+              <button onClick={() => setDrawMode('object')} className={`rounded-lg px-3 py-2 text-sm ${drawMode === 'object' ? 'bg-amber-300 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Draw debug object</button>
+            </div>
+            <label className="mt-4 block text-xs text-slate-400">Debug object confidence: {Math.round(objectConfidence * 100)}%</label>
+            <input className="mt-2 w-full accent-cyan-300" type="range" min="0" max="1" step="0.01" value={objectConfidence} onChange={(event) => { setObjectConfidence(Number(event.target.value)); setObservedAt(Date.now()) }} />
+            <div className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
+              <label className="flex items-center justify-between"><span>Camera evidence available</span><input type="checkbox" checked={cameraAvailable} onChange={(event) => setCameraAvailable(event.target.checked)} /></label>
+              <label className="flex items-center justify-between"><span>Protected zone occluded</span><input type="checkbox" checked={occluded} onChange={(event) => { setOccluded(event.target.checked); setObservedAt(Date.now()) }} /></label>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button onClick={() => { setObjectBox(null); setObservedAt(Date.now()) }} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700">No object visible</button>
+              <button onClick={() => setObservedAt(Date.now())} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700">Refresh evidence</button>
+            </div>
+          </section>
+
+          <p className="mt-4 text-xs leading-5 text-slate-500">This view reports visible overlap in the latest Ring evidence. It does not certify accessibility, safety, or legal clearance.</p>
+
+          {!isSimpleMode && (
+            <div className="mt-5 border-t border-slate-700 pt-4">
             {/* Tab switcher */}
             <div className="p-3 border-b border-slate-700 flex gap-2">
               <button
@@ -180,8 +325,9 @@ export default function Dashboard() {
             ) : (
               <ProcessorPanel processors={processors} results={results} onToggle={toggleProcessor} />
             )}
-          </div>
-        )}
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   )
