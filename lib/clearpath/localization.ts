@@ -3,18 +3,25 @@ import { z } from 'zod'
 const normalizedCoordinate = z.number().finite().min(0).max(1)
 
 export const localizationSchema = z.object({
+  status: z.enum(['object', 'none', 'uncertain']),
   category: z.enum(['parcel', 'movable_object', 'unknown']),
   bounds: z.object({
     x: normalizedCoordinate,
     y: normalizedCoordinate,
     width: normalizedCoordinate.positive(),
     height: normalizedCoordinate.positive(),
-  }),
+  }).nullable(),
   confidence: z.number().finite().min(0).max(1),
   occluded: z.boolean(),
   frameTimestamp: z.number().int().positive(),
 }).superRefine((value, context) => {
-  if (value.bounds.x + value.bounds.width > 1) {
+  if (value.status === 'object' && !value.bounds) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['bounds'], message: 'An object requires bounds.' })
+  }
+  if (value.status !== 'object' && value.bounds) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['bounds'], message: 'Only a detected object may have bounds.' })
+  }
+  if (value.bounds && value.bounds.x + value.bounds.width > 1) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['bounds', 'width'],
@@ -22,7 +29,7 @@ export const localizationSchema = z.object({
     })
   }
 
-  if (value.bounds.y + value.bounds.height > 1) {
+  if (value.bounds && value.bounds.y + value.bounds.height > 1) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['bounds', 'height'],
@@ -49,4 +56,3 @@ export function validateLocalization(input: unknown): LocalizationValidation {
     }),
   }
 }
-

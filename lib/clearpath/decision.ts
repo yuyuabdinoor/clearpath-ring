@@ -64,7 +64,9 @@ export function decideAccessState(
     return {
       state: 'review_needed',
       overlapRatio: null,
-      reason: 'The latest usable Ring view is too old to describe the current entrance state.',
+      reason: evidence.observedAt === 0
+        ? 'Capture and analyze a Ring frame before assessing the access zone.'
+        : 'The latest usable Ring view is too old to describe the current entrance state.',
       observedAt: evidence.observedAt,
     }
   }
@@ -79,6 +81,13 @@ export function decideAccessState(
   }
 
   if (!evidence.object) {
+    if (evidence.objectConfidence < policy.minimumObjectConfidence) {
+      return {
+        state: 'review_needed', overlapRatio: null,
+        reason: 'No obstruction was localized, but confidence is too low to confirm the zone is clear.',
+        observedAt: evidence.observedAt,
+      }
+    }
     return {
       state: 'zone_clear',
       overlapRatio: 0,
@@ -117,4 +126,3 @@ export function decideAccessState(
     observedAt: evidence.observedAt,
   }
 }
-

@@ -15,12 +15,14 @@ import {
   NormalizedRect,
   decideAccessState,
 } from '@/lib/clearpath/decision'
+import { LocalizationResult, validateLocalization } from '@/lib/clearpath/localization'
 
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
 type DrawMode = 'zone' | 'object'
 type CapturedFrame = {
   url: string
+  blob: Blob
   capturedAt: number
   width: number
   height: number
@@ -49,11 +51,44 @@ export default function Dashboard() {
   const [cameraAvailable, setCameraAvailable] = useState(true)
   const [observedAt, setObservedAt] = useState(Date.now())
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
+  const [localization, setLocalization] = useState<LocalizationResult | null>(null)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [now, setNow] = useState(Date.now())
+  const [videoViewport, setVideoViewport] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [captureError, setCaptureError] = useState<string | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const analysisGenerationRef = useRef(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const videoContainerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const video = videoRef.current
+    const container = videoContainerRef.current
+    if (!video || !container) return
+    const update = () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        setVideoViewport(null)
+        return
+      }
+      const scale = Math.min(container.clientWidth / video.videoWidth, container.clientHeight / video.videoHeight)
+      const width = video.videoWidth * scale
+      const height = video.videoHeight * scale
+      setVideoViewport({ left: (container.clientWidth - width) / 2, top: (container.clientHeight - height) / 2, width, height })
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(container)
+    video.addEventListener('loadedmetadata', update)
+    update()
+    return () => { observer.disconnect(); video.removeEventListener('loadedmetadata', update) }
+  }, [loading, authError])
 
   // Fetch auth mode on mount
   useEffect(() => {
@@ -106,17 +141,24 @@ export default function Dashboard() {
   const isSimpleMode = authMode === 'access_token'
 
   const decision = useMemo(() => decideAccessState({
-    observedAt,
+    observedAt: localization?.frameTimestamp ?? 0,
     cameraAvailable: cameraAvailable && streamActive,
-    object: objectBox,
-    objectConfidence,
-    occluded,
+    object: localization?.status === 'object' ? localization.bounds : null,
+    objectConfidence: localization?.status === 'uncertain' || localization?.category === 'unknown' ? 0 : localization?.confidence ?? 0,
+    occluded: occluded || localization?.occluded === true,
   }, {
     protectedZone,
     minimumObjectConfidence: 0.7,
     minimumOverlapRatio: 0.1,
     maximumEvidenceAgeMs: 60_000,
-  }), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, protectedZone, streamActive])
+  }, now), [cameraAvailable, localization, now, occluded, protectedZone, streamActive])
+
+  const debugDecision = useMemo(() => decideAccessState({
+    observedAt, cameraAvailable: cameraAvailable && streamActive, object: objectBox,
+    objectConfidence, occluded,
+  }, {
+    protectedZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
+  }, now), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, protectedZone, streamActive, now])
 
   const presentation = statePresentation[decision.state]
 
@@ -145,7 +187,11 @@ export default function Dashboard() {
     }
     dragStartRef.current = null
     if (rect.width < 0.015 || rect.height < 0.015) return
-    if (drawMode === 'zone') setProtectedZone(rect)
+    if (drawMode === 'zone') {
+      analysisGenerationRef.current += 1
+      setLocalization(null)
+      setProtectedZone(rect)
+    }
     else {
       setObjectBox(rect)
       setObservedAt(Date.now())
@@ -179,11 +225,44 @@ export default function Dashboard() {
       const url = URL.createObjectURL(blob)
       setCapturedFrame((previous) => {
         if (previous) URL.revokeObjectURL(previous.url)
-        return { url, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
+        return { url, blob, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
       })
+      analysisGenerationRef.current += 1
+      setLocalization(null)
+      setAnalysisError(null)
       setObservedAt(capturedAt)
       setCaptureError(null)
     }, 'image/jpeg', 0.9)
+  }
+
+  const analyzeFrame = async () => {
+    if (!capturedFrame || analyzing) return
+    if (Date.now() - capturedFrame.capturedAt > 60_000) {
+      setAnalysisError('This frame is older than 60 seconds. Capture a fresh frame.')
+      return
+    }
+    setAnalyzing(true)
+    setAnalysisError(null)
+    const generation = ++analysisGenerationRef.current
+    const form = new FormData()
+    form.append('frame', capturedFrame.blob, 'ring-frame.jpg')
+    form.append('capturedAt', String(capturedFrame.capturedAt))
+    form.append('zone', JSON.stringify(protectedZone))
+    try {
+      const response = await fetch('/api/clearpath/localize', { method: 'POST', body: form })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Frame analysis failed.')
+      const validated = validateLocalization(data)
+      if (!validated.valid) throw new Error('The localization result failed validation.')
+      if (generation !== analysisGenerationRef.current) return
+      setLocalization(validated.result)
+    } catch (error) {
+      if (generation !== analysisGenerationRef.current) return
+      setLocalization(null)
+      setAnalysisError(error instanceof Error ? error.message : 'Frame analysis failed.')
+    } finally {
+      setAnalyzing(false)
+    }
   }
 
   useEffect(() => () => {
@@ -222,12 +301,13 @@ export default function Dashboard() {
       {/* Main content */}
       <div className="flex-1 flex min-h-0">
         <div className="w-[66%] p-4 flex flex-col">
-          <div className="relative flex-1 bg-black rounded-xl overflow-hidden">
+          <div ref={videoContainerRef} className="relative flex-1 bg-black rounded-xl overflow-hidden">
             <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
             <div
-              className="absolute inset-0 cursor-crosshair touch-none"
+              className="absolute cursor-crosshair touch-none"
+              style={videoViewport ? { left: videoViewport.left, top: videoViewport.top, width: videoViewport.width, height: videoViewport.height } : { inset: 0 }}
               onPointerDown={beginDrawing}
               onPointerUp={finishDrawing}
               aria-label={`Draw ${drawMode === 'zone' ? 'protected zone' : 'debug object box'}`}
@@ -259,6 +339,14 @@ export default function Dashboard() {
                   <span className="absolute -top-7 right-0 rounded bg-amber-950/90 px-2 py-1 text-[11px] font-semibold text-amber-100">
                     Debug object · {Math.round(objectConfidence * 100)}%
                   </span>
+                </div>
+              )}
+              {localization?.status === 'object' && localization.bounds && (
+                <div className="absolute border-2 border-rose-300 bg-rose-300/15" style={{
+                  left: `${localization.bounds.x * 100}%`, top: `${localization.bounds.y * 100}%`,
+                  width: `${localization.bounds.width * 100}%`, height: `${localization.bounds.height * 100}%`,
+                }}>
+                  <span className="absolute -bottom-7 left-0 rounded bg-rose-950/90 px-2 py-1 text-[11px] font-semibold text-rose-100">Model: {localization.category} · {Math.round(localization.confidence * 100)}%</span>
                 </div>
               )}
             </div>
@@ -318,7 +406,7 @@ export default function Dashboard() {
             <p className="mt-2 text-sm leading-5 text-slate-200">{decision.reason}</p>
             <div className="mt-3 flex justify-between text-xs text-slate-400">
               <span>Latest evidence</span>
-              <span>{new Date(decision.observedAt).toLocaleTimeString()}</span>
+              <span>{localization ? new Date(decision.observedAt).toLocaleTimeString() : 'Not analyzed'}</span>
             </div>
             {decision.overlapRatio !== null && (
               <div className="mt-1 flex justify-between text-xs text-slate-400">
@@ -347,6 +435,9 @@ export default function Dashboard() {
                 </div>
               </div>
             )}
+            {capturedFrame && <button onClick={analyzeFrame} disabled={analyzing || !streamActive} className="mt-3 rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">{analyzing ? 'Analyzing…' : 'Analyze captured frame'}</button>}
+            {analysisError && <p className="mt-2 text-xs text-amber-300">{analysisError}</p>}
+            {localization && <p className="mt-2 text-xs text-slate-300">Model result: {localization.status} · {Math.round(localization.confidence * 100)}% confidence. Frame sent for analysis; raw image is not saved by ClearPath.</p>}
           </section>
 
           <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
@@ -365,6 +456,7 @@ export default function Dashboard() {
               <button onClick={() => { setObjectBox(null); setObservedAt(Date.now()) }} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700">No object visible</button>
               <button onClick={() => setObservedAt(Date.now())} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700">Refresh evidence</button>
             </div>
+            <p className="mt-3 text-xs text-slate-400">Debug simulation only: {statePresentation[debugDecision.state].label}. It does not set the live assessment.</p>
           </section>
 
           <p className="mt-4 text-xs leading-5 text-slate-500">This view reports visible overlap in the latest Ring evidence. It does not certify accessibility, safety, or legal clearance.</p>
