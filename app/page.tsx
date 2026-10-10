@@ -20,6 +20,8 @@ import { LocalizationResult, validateLocalization } from '@/lib/clearpath/locali
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
 type DrawMode = 'zone' | 'object'
+type SourceMode = 'sample' | 'ring'
+type SampleCase = 'clear' | 'obstructed' | 'review' | 'unavailable' | 'removed'
 type CapturedFrame = {
   url: string
   blob: Blob
@@ -35,8 +37,15 @@ const statePresentation: Record<AccessState, { label: string; color: string; bac
   camera_unavailable: { label: 'CAMERA UNAVAILABLE', color: 'text-slate-200', background: 'bg-slate-500/15 border-slate-400/40' },
 }
 
+const sampleObject: NormalizedRect = { x: 0.55, y: 0.61, width: 0.18, height: 0.2 }
+const clearZone: NormalizedRect = { x: 0.25, y: 0.55, width: 0.25, height: 0.35 }
+const obstructedZone: NormalizedRect = { x: 0.5, y: 0.55, width: 0.3, height: 0.35 }
+
 export default function Dashboard() {
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>('events')
+  const [sourceMode, setSourceMode] = useState<SourceMode>('sample')
+  const [sampleCase, setSampleCase] = useState<SampleCase>('obstructed')
+  const [sampleObservedAt, setSampleObservedAt] = useState(Date.now())
   const [webhookUrl, setWebhookUrl] = useState('')
   const [deviceId, setDeviceId] = useState<string | undefined>(undefined)
   const [deviceError, setDeviceError] = useState<string | null>(null)
@@ -74,6 +83,13 @@ export default function Dashboard() {
     const container = videoContainerRef.current
     if (!video || !container) return
     const update = () => {
+      if (sourceMode === 'sample') {
+        const scale = Math.min(container.clientWidth / 1280, container.clientHeight / 720)
+        const width = 1280 * scale
+        const height = 720 * scale
+        setVideoViewport({ left: (container.clientWidth - width) / 2, top: (container.clientHeight - height) / 2, width, height })
+        return
+      }
       if (!video.videoWidth || !video.videoHeight) {
         setVideoViewport(null)
         return
@@ -88,7 +104,7 @@ export default function Dashboard() {
     video.addEventListener('loadedmetadata', update)
     update()
     return () => { observer.disconnect(); video.removeEventListener('loadedmetadata', update) }
-  }, [loading, authError])
+  }, [loading, authError, sourceMode])
 
   // Fetch auth mode on mount
   useEffect(() => {
@@ -160,7 +176,24 @@ export default function Dashboard() {
     protectedZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
   }, now), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, protectedZone, streamActive, now])
 
-  const presentation = statePresentation[decision.state]
+  const sampleDecision = useMemo(() => decideAccessState({
+    observedAt: sampleObservedAt,
+    cameraAvailable: sampleCase !== 'unavailable',
+    object: sampleCase === 'removed' ? null : sampleObject,
+    objectConfidence: sampleCase === 'review' ? 0.45 : 0.95,
+    occluded: false,
+  }, {
+    protectedZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
+  }, now), [sampleObservedAt, sampleCase, protectedZone, now])
+  const activeDecision = sourceMode === 'sample' ? sampleDecision : decision
+  const presentation = statePresentation[activeDecision.state]
+
+  const selectSampleCase = (next: SampleCase) => {
+    setSampleCase(next)
+    setSampleObservedAt(Date.now())
+    if (next === 'clear') setProtectedZone(clearZone)
+    else setProtectedZone(obstructedZone)
+  }
 
   const normalizedPoint = (event: PointerEvent<HTMLDivElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -191,6 +224,7 @@ export default function Dashboard() {
       analysisGenerationRef.current += 1
       setLocalization(null)
       setProtectedZone(rect)
+      if (sourceMode === 'sample') setSampleObservedAt(Date.now())
     }
     else {
       setObjectBox(rect)
@@ -269,27 +303,6 @@ export default function Dashboard() {
     if (capturedFrame) URL.revokeObjectURL(capturedFrame.url)
   }, [capturedFrame])
 
-  // Loading state
-  if (loading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-dash-bg">
-        <p className="text-slate-400">Loading...</p>
-      </div>
-    )
-  }
-
-  // Auth error state
-  if (authError) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-dash-bg">
-        <div className="text-center max-w-md">
-          <p className="text-red-400 text-lg font-medium mb-2">Configuration Error</p>
-          <p className="text-slate-400">{authError}</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="h-screen flex flex-col">
       <Header
@@ -298,12 +311,22 @@ export default function Dashboard() {
         simpleMode={isSimpleMode}
       />
 
+      <div className="flex items-center gap-2 border-b border-slate-700 bg-slate-950 px-4 py-2 text-sm">
+        <button onClick={() => setSourceMode('sample')} className={`rounded-lg px-3 py-1.5 ${sourceMode === 'sample' ? 'bg-cyan-300 font-semibold text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Sample test · no hardware</button>
+        <button onClick={() => setSourceMode('ring')} className={`rounded-lg px-3 py-1.5 ${sourceMode === 'ring' ? 'bg-cyan-300 font-semibold text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Live Ring</button>
+        <span className="ml-auto text-xs text-slate-400">{sourceMode === 'sample' ? 'Synthetic frame + supplied object bounds; no AI or Ring claim' : 'Live Ring evidence'}</span>
+      </div>
+
       {/* Main content */}
       <div className="flex-1 flex min-h-0">
         <div className="w-[66%] p-4 flex flex-col">
           <div ref={videoContainerRef} className="relative flex-1 bg-black rounded-xl overflow-hidden">
-            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
-            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+            <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-contain ${sourceMode === 'sample' ? 'invisible' : ''}`} />
+            <canvas ref={canvasRef} className={`absolute inset-0 w-full h-full pointer-events-none ${sourceMode === 'sample' ? 'hidden' : ''}`} />
+            {sourceMode === 'sample' && <div className="absolute bg-black" style={videoViewport ? { left: videoViewport.left, top: videoViewport.top, width: videoViewport.width, height: videoViewport.height } : { inset: 0 }}>
+              {sampleCase === 'unavailable' ? <div className="flex h-full items-center justify-center text-sm text-slate-300">Synthetic camera unavailable</div> : <img src="/sample-entrance.svg" alt="Synthetic test entrance, not Ring footage" className="h-full w-full" />}
+              {sampleCase !== 'removed' && sampleCase !== 'unavailable' && <div className="absolute border border-amber-950 bg-amber-700 shadow-xl" style={{ left: '55%', top: '61%', width: '18%', height: '20%', transform: 'skewY(-4deg)' }}><div className="h-full w-full border-l-[12px] border-t-[10px] border-amber-500/80"><span className="absolute bottom-2 left-3 text-xs font-bold text-amber-100">PARCEL</span></div></div>}
+            </div>}
 
             <div
               className="absolute cursor-crosshair touch-none"
@@ -326,7 +349,7 @@ export default function Dashboard() {
                 </span>
               </div>
 
-              {objectBox && (
+              {sourceMode === 'ring' && objectBox && (
                 <div
                   className="absolute border-2 border-amber-300 bg-amber-300/15"
                   style={{
@@ -341,7 +364,7 @@ export default function Dashboard() {
                   </span>
                 </div>
               )}
-              {localization?.status === 'object' && localization.bounds && (
+              {sourceMode === 'ring' && localization?.status === 'object' && localization.bounds && (
                 <div className="absolute border-2 border-rose-300 bg-rose-300/15" style={{
                   left: `${localization.bounds.x * 100}%`, top: `${localization.bounds.y * 100}%`,
                   width: `${localization.bounds.width * 100}%`, height: `${localization.bounds.height * 100}%`,
@@ -349,13 +372,20 @@ export default function Dashboard() {
                   <span className="absolute -bottom-7 left-0 rounded bg-rose-950/90 px-2 py-1 text-[11px] font-semibold text-rose-100">Model: {localization.category} · {Math.round(localization.confidence * 100)}%</span>
                 </div>
               )}
+              {sourceMode === 'sample' && sampleCase !== 'removed' && sampleCase !== 'unavailable' && (
+                <div className="absolute border-2 border-amber-300 bg-amber-300/10" style={{ left: '55%', top: '61%', width: '18%', height: '20%' }}>
+                  <span className="absolute -bottom-7 left-0 rounded bg-amber-950/90 px-2 py-1 text-[11px] font-semibold text-amber-100">Supplied test box · not AI</span>
+                </div>
+              )}
             </div>
 
-            {!streamActive && (
+            {sourceMode === 'ring' && !streamActive && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                {loading && <p className="text-slate-300">Checking Ring configuration…</p>}
+                {authError && <p className="max-w-md text-center text-sm text-rose-300">Ring configuration: {authError}. Sample test mode remains available.</p>}
                 <button
                   onClick={startStream}
-                  disabled={!deviceId}
+                  disabled={!deviceId || Boolean(authError)}
                   className={`px-6 py-3 font-bold rounded-lg transition ${deviceId ? 'bg-dash-cyan text-black hover:bg-cyan-300' : 'bg-slate-600 text-slate-400 cursor-not-allowed'}`}
                 >
                   {deviceId ? '▶ Start Live Stream' : '⏳ Discovering device...'}
@@ -369,7 +399,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            {streamActive && (
+            {sourceMode === 'ring' && streamActive && (
               <button
                 onClick={stopStream}
                 className="absolute top-3 right-3 px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-500"
@@ -380,7 +410,7 @@ export default function Dashboard() {
           </div>
 
           {/* Webhook URL helper — only in full mode */}
-          {!isSimpleMode && (
+          {sourceMode === 'ring' && !isSimpleMode && (
             <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
               <span>Webhook URL:</span>
               <code className="bg-dash-card px-2 py-1 rounded text-slate-300 flex-1 truncate">{webhookUrl}</code>
@@ -398,25 +428,36 @@ export default function Dashboard() {
           <div className="mb-5">
             <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">ClearPath calibration</p>
             <h1 className="mt-1 text-2xl font-semibold text-white">Is the resident&apos;s route clear?</h1>
-            <p className="mt-2 text-sm leading-6 text-slate-400">Draw normalized evidence regions over the real Ring stream. Manual object boxes are visibly labeled debug instrumentation.</p>
+            <p className="mt-2 text-sm leading-6 text-slate-400">{sourceMode === 'sample' ? 'Try the decision engine on a synthetic entrance. No Ring device or AI key is needed.' : 'Draw normalized evidence regions over the real Ring stream. Manual object boxes are visibly labeled debug instrumentation.'}</p>
           </div>
+
+          {sourceMode === 'sample' && <section className="mb-4 rounded-xl border border-cyan-500/40 bg-cyan-500/10 p-4">
+            <p className="text-sm font-semibold text-cyan-100">Sample test cases</p>
+            <p className="mt-1 text-xs text-slate-300">Preset zones and supplied boxes are disclosed test inputs. Draw a different access zone to test the geometry yourself.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {([['clear', 'Clear route'], ['obstructed', 'Obstructed'], ['review', 'Low confidence'], ['unavailable', 'No camera'], ['removed', 'Removed']] as const).map(([value, label]) => (
+                <button key={value} onClick={() => selectSampleCase(value)} className={`rounded-md px-3 py-1.5 text-xs ${sampleCase === value ? 'bg-cyan-300 font-semibold text-slate-950' : 'bg-slate-800 text-slate-200'}`}>{label}</button>
+              ))}
+            </div>
+            <button onClick={() => setSampleObservedAt(Date.now())} className="mt-3 text-xs text-cyan-200 underline">Refresh simulated observation</button>
+          </section>}
 
           <section className={`rounded-xl border p-4 ${presentation.background}`}>
             <p className={`text-lg font-bold ${presentation.color}`}>{presentation.label}</p>
-            <p className="mt-2 text-sm leading-5 text-slate-200">{decision.reason}</p>
+            <p className="mt-2 text-sm leading-5 text-slate-200">{activeDecision.reason}</p>
             <div className="mt-3 flex justify-between text-xs text-slate-400">
               <span>Latest evidence</span>
-              <span>{localization ? new Date(decision.observedAt).toLocaleTimeString() : 'Not analyzed'}</span>
+              <span>{sourceMode === 'sample' ? `${new Date(sampleObservedAt).toLocaleTimeString()} · simulated` : localization ? new Date(decision.observedAt).toLocaleTimeString() : 'Not analyzed'}</span>
             </div>
-            {decision.overlapRatio !== null && (
+            {activeDecision.overlapRatio !== null && (
               <div className="mt-1 flex justify-between text-xs text-slate-400">
                 <span>Object overlap</span>
-                <span>{Math.round(decision.overlapRatio * 100)}%</span>
+                <span>{Math.round(activeDecision.overlapRatio * 100)}%</span>
               </div>
             )}
           </section>
 
-          <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+          {sourceMode === 'ring' && <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-white">Ring evidence</p>
@@ -438,9 +479,9 @@ export default function Dashboard() {
             {capturedFrame && <button onClick={analyzeFrame} disabled={analyzing || !streamActive} className="mt-3 rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">{analyzing ? 'Analyzing…' : 'Analyze captured frame'}</button>}
             {analysisError && <p className="mt-2 text-xs text-amber-300">{analysisError}</p>}
             {localization && <p className="mt-2 text-xs text-slate-300">Model result: {localization.status} · {Math.round(localization.confidence * 100)}% confidence. Frame sent for analysis; raw image is not saved by ClearPath.</p>}
-          </section>
+          </section>}
 
-          <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+          {sourceMode === 'ring' && <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
             <p className="text-sm font-semibold text-white">Calibration tools</p>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <button onClick={() => setDrawMode('zone')} className={`rounded-lg px-3 py-2 text-sm ${drawMode === 'zone' ? 'bg-cyan-300 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Draw access zone</button>
@@ -457,11 +498,17 @@ export default function Dashboard() {
               <button onClick={() => setObservedAt(Date.now())} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700">Refresh evidence</button>
             </div>
             <p className="mt-3 text-xs text-slate-400">Debug simulation only: {statePresentation[debugDecision.state].label}. It does not set the live assessment.</p>
-          </section>
+          </section>}
 
-          <p className="mt-4 text-xs leading-5 text-slate-500">This view reports visible overlap in the latest Ring evidence. It does not certify accessibility, safety, or legal clearance.</p>
+          {sourceMode === 'sample' && <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+            <p className="text-sm font-semibold text-white">Draw your own access zone</p>
+            <p className="mt-2 text-xs leading-5 text-slate-400">Drag across the synthetic entrance. Blue is the resident-defined zone; amber is the supplied parcel boundary. A parcel outside the zone should remain clear.</p>
+            <button onClick={() => setDrawMode('zone')} className="mt-3 rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950">Draw access zone</button>
+          </section>}
 
-          {!isSimpleMode && (
+          <p className="mt-4 text-xs leading-5 text-slate-500">{sourceMode === 'sample' ? 'This synthetic test validates UI and decision geometry only. It does not test Ring capture or AI detection.' : 'This view reports visible overlap in the latest Ring evidence. It does not certify accessibility, safety, or legal clearance.'}</p>
+
+          {sourceMode === 'ring' && !isSimpleMode && (
             <div className="mt-5 border-t border-slate-700 pt-4">
             {/* Tab switcher */}
             <div className="p-3 border-b border-slate-700 flex gap-2">

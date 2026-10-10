@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-label="Illustrated front entrance test scene">
+  <rect width="1280" height="720" fill="#293847"/>
+  <rect x="0" y="0" width="1280" height="450" fill="#586b73"/>
+  <path d="M0 430h1280v290H0z" fill="#718086"/>
+  <path d="M0 550h1280M0 640h1280" stroke="#9caaab" stroke-width="5"/>
+  <path d="M210 450V0M1050 450V0" stroke="#344853" stroke-width="24"/>
+  <rect x="390" y="58" width="500" height="410" rx="12" fill="#263744" stroke="#b0a889" stroke-width="16"/>
+  <rect x="430" y="90" width="420" height="350" rx="6" fill="#405663"/>
+  <rect x="455" y="115" width="370" height="145" fill="#819da5"/>
+  <path d="M640 115v145" stroke="#405663" stroke-width="16"/>
+  <circle cx="794" cy="323" r="13" fill="#e7d7a3"/>
+  <path d="M280 465h720l120 255H160z" fill="#a5aaa3" stroke="#d0d1c4" stroke-width="7"/>
+  <path d="M395 468 330 720M885 468l65 252" stroke="#dadecf" stroke-width="4"/>
+  <text x="48" y="64" fill="#fff" font-family="Arial,sans-serif" font-size="28" font-weight="700">SYNTHETIC TEST ENTRANCE</text>
+</svg>
