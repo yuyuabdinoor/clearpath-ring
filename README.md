@@ -6,7 +6,7 @@ ClearPath checks whether a resident-defined entrance zone visibly overlaps a par
 
 Run `npm install` and `npm run dev`, then open `http://localhost:3000`. The app starts in **Sample test** mode. Pick Clear route, Obstructed, Low confidence, No camera, or Removed; drag on the synthetic entrance to define your own blue access zone. The amber parcel boundary is a supplied test input, not AI detection. This exercises the UI, normalized coordinates, overlap calculation, and decision states—but not live Ring capture or model localization. Run `npm test` (Node 22.18+ required) for deterministic decision checks.
 
-For the ClearPath flow, copy `.env.example` to `.env.local`, set a Ring Playground access token, and optionally set `OPENAI_API_KEY` for model localization. Keep both keys server-side. Run `npm install` and `npm run dev`, then start the live stream, draw the access zone, capture a frame, and select **Analyze captured frame**. The model receives that single JPEG and returns structured coordinates; ClearPath validates them and computes overlap locally. The raw frame stays transient in the browser and request memory. `store: false` is sent to the model API, but do not assume this overrides the provider's own data-handling terms.
+For the ClearPath flow, copy `.env.example` to `.env.local`, set a Ring Playground access token, and optionally set `OPENAI_API_KEY` for model localization. Keep both keys server-side. Run `npm install` and `npm run dev`, then start the live stream, draw the access zone, capture a frame, and select **Analyze captured frame**. The browser receives an opaque stream session ID; the Ring token and session URL remain on the server. The model receives that single JPEG and returns structured coordinates; ClearPath validates them and computes overlap locally. The raw frame stays transient in the browser and request memory. `store: false` is sent to the model API, but do not assume this overrides the provider's own data-handling terms.
 
 Without `OPENAI_API_KEY`, the stream and manual debug tools still work, but the live assessment remains **REVIEW NEEDED** until a frame is analyzed. Debug boxes never change the live assessment. A new frame, changed zone, stale analysis, weak confidence, or uncertain visibility also prevents a clear result. The current prototype requires manual capture and analysis; it does not yet automatically verify removal or send obstruction notifications.
 
@@ -259,8 +259,7 @@ app/
         ├── config/            # Auth mode detection
         ├── devices/           # Device discovery + status
         ├── stream/            # WebRTC WHEP live streaming
-        ├── events/            # Event history
-        └── token/             # Token info
+        └── events/            # In-memory webhook events
 
 lib/
 ├── auth.ts                    # Token management (access token / refresh token)

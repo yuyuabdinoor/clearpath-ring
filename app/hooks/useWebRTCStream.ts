@@ -22,7 +22,7 @@ export function useWebRTCStream({ videoRef, deviceId }: UseWebRTCStreamOptions):
   const [streamActive, setStreamActive] = useState(false)
   const [streamError, setStreamError] = useState<string | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
-  const sessionUrlRef = useRef<string | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
 
   const startStream = useCallback(async () => {
     setStreamError(null)
@@ -71,8 +71,8 @@ export function useWebRTCStream({ videoRef, deviceId }: UseWebRTCStreamOptions):
         throw new Error(err.error || 'Stream start failed')
       }
 
-      const { sdpAnswer, sessionUrl } = await res.json()
-      sessionUrlRef.current = sessionUrl
+      const { sdpAnswer, sessionId } = await res.json()
+      sessionIdRef.current = sessionId
       await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Stream failed'
@@ -85,13 +85,13 @@ export function useWebRTCStream({ videoRef, deviceId }: UseWebRTCStreamOptions):
   const stopStream = useCallback(async () => {
     pcRef.current?.close()
     pcRef.current = null
-    if (sessionUrlRef.current) {
+    if (sessionIdRef.current) {
       await fetch('/api/ring/stream', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionUrl: sessionUrlRef.current }),
+        body: JSON.stringify({ sessionId: sessionIdRef.current }),
       }).catch(() => {})
-      sessionUrlRef.current = null
+      sessionIdRef.current = null
     }
     if (videoRef.current) videoRef.current.srcObject = null
     setStreamActive(false)

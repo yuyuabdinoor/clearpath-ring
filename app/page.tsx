@@ -16,6 +16,7 @@ import {
   decideAccessState,
 } from '@/lib/clearpath/decision'
 import { LocalizationResult, validateLocalization } from '@/lib/clearpath/localization'
+import { assessmentForZone, withZone, ProtectedZones, ZoneAssessment } from '@/lib/clearpath/zone-assessment'
 
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
@@ -53,14 +54,17 @@ export default function Dashboard() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [drawMode, setDrawMode] = useState<DrawMode>('zone')
-  const [protectedZone, setProtectedZone] = useState<NormalizedRect>({ x: 0.18, y: 0.5, width: 0.38, height: 0.42 })
+  const [zones, setZones] = useState<ProtectedZones>({
+    sample: { x: 0.18, y: 0.5, width: 0.38, height: 0.42 },
+    ring: { x: 0.18, y: 0.5, width: 0.38, height: 0.42 },
+  })
   const [objectBox, setObjectBox] = useState<NormalizedRect | null>(null)
   const [objectConfidence, setObjectConfidence] = useState(0.92)
   const [occluded, setOccluded] = useState(false)
   const [cameraAvailable, setCameraAvailable] = useState(true)
   const [observedAt, setObservedAt] = useState(Date.now())
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
-  const [localization, setLocalization] = useState<LocalizationResult | null>(null)
+  const [liveAssessment, setLiveAssessment] = useState<ZoneAssessment<LocalizationResult> | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [now, setNow] = useState(Date.now())
@@ -155,6 +159,9 @@ export default function Dashboard() {
   }, [])
 
   const isSimpleMode = authMode === 'access_token'
+  const { sample: sampleZone, ring: ringZone } = zones
+  const protectedZone = sourceMode === 'sample' ? sampleZone : ringZone
+  const localization = assessmentForZone(liveAssessment, ringZone)
 
   const decision = useMemo(() => decideAccessState({
     observedAt: localization?.frameTimestamp ?? 0,
@@ -163,18 +170,18 @@ export default function Dashboard() {
     objectConfidence: localization?.status === 'uncertain' || localization?.category === 'unknown' ? 0 : localization?.confidence ?? 0,
     occluded: occluded || localization?.occluded === true,
   }, {
-    protectedZone,
+    protectedZone: ringZone,
     minimumObjectConfidence: 0.7,
     minimumOverlapRatio: 0.1,
     maximumEvidenceAgeMs: 60_000,
-  }, now), [cameraAvailable, localization, now, occluded, protectedZone, streamActive])
+  }, now), [cameraAvailable, localization, now, occluded, ringZone, streamActive])
 
   const debugDecision = useMemo(() => decideAccessState({
     observedAt, cameraAvailable: cameraAvailable && streamActive, object: objectBox,
     objectConfidence, occluded,
   }, {
-    protectedZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
-  }, now), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, protectedZone, streamActive, now])
+    protectedZone: ringZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
+  }, now), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, ringZone, streamActive, now])
 
   const sampleDecision = useMemo(() => decideAccessState({
     observedAt: sampleObservedAt,
@@ -183,16 +190,15 @@ export default function Dashboard() {
     objectConfidence: sampleCase === 'review' ? 0.45 : 0.95,
     occluded: false,
   }, {
-    protectedZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
-  }, now), [sampleObservedAt, sampleCase, protectedZone, now])
+    protectedZone: sampleZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
+  }, now), [sampleObservedAt, sampleCase, sampleZone, now])
   const activeDecision = sourceMode === 'sample' ? sampleDecision : decision
   const presentation = statePresentation[activeDecision.state]
 
   const selectSampleCase = (next: SampleCase) => {
     setSampleCase(next)
     setSampleObservedAt(Date.now())
-    if (next === 'clear') setProtectedZone(clearZone)
-    else setProtectedZone(obstructedZone)
+    setZones(current => withZone(current, 'sample', next === 'clear' ? clearZone : obstructedZone))
   }
 
   const normalizedPoint = (event: PointerEvent<HTMLDivElement>) => {
@@ -221,10 +227,14 @@ export default function Dashboard() {
     dragStartRef.current = null
     if (rect.width < 0.015 || rect.height < 0.015) return
     if (drawMode === 'zone') {
-      analysisGenerationRef.current += 1
-      setLocalization(null)
-      setProtectedZone(rect)
-      if (sourceMode === 'sample') setSampleObservedAt(Date.now())
+      if (sourceMode === 'sample') {
+        setZones(current => withZone(current, 'sample', rect))
+        setSampleObservedAt(Date.now())
+      } else {
+        analysisGenerationRef.current += 1
+        setLiveAssessment(null)
+        setZones(current => withZone(current, 'ring', rect))
+      }
     }
     else {
       setObjectBox(rect)
@@ -262,7 +272,7 @@ export default function Dashboard() {
         return { url, blob, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
       })
       analysisGenerationRef.current += 1
-      setLocalization(null)
+      setLiveAssessment(null)
       setAnalysisError(null)
       setObservedAt(capturedAt)
       setCaptureError(null)
@@ -281,7 +291,7 @@ export default function Dashboard() {
     const form = new FormData()
     form.append('frame', capturedFrame.blob, 'ring-frame.jpg')
     form.append('capturedAt', String(capturedFrame.capturedAt))
-    form.append('zone', JSON.stringify(protectedZone))
+    form.append('zone', JSON.stringify(ringZone))
     try {
       const response = await fetch('/api/clearpath/localize', { method: 'POST', body: form })
       const data = await response.json()
@@ -289,10 +299,10 @@ export default function Dashboard() {
       const validated = validateLocalization(data)
       if (!validated.valid) throw new Error('The localization result failed validation.')
       if (generation !== analysisGenerationRef.current) return
-      setLocalization(validated.result)
+      setLiveAssessment({ zone: ringZone, result: validated.result })
     } catch (error) {
       if (generation !== analysisGenerationRef.current) return
-      setLocalization(null)
+      setLiveAssessment(null)
       setAnalysisError(error instanceof Error ? error.message : 'Frame analysis failed.')
     } finally {
       setAnalyzing(false)

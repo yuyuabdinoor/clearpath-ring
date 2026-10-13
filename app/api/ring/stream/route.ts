@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAccessToken } from '@/lib/auth'
+import { registerStreamSession, takeStreamSession } from '@/lib/ring/stream-sessions'
 
 const API_BASE = 'https://api.amazonvision.com'
 
@@ -41,9 +42,12 @@ export async function POST(request: NextRequest) {
     }
 
     const sdpAnswer = await response.text()
-    const sessionUrl = response.headers.get('Location')
+    const sessionId = registerStreamSession(response.headers.get('Location'), whepUrl)
+    if (!sessionId) {
+      return NextResponse.json({ error: 'Ring returned an invalid WHEP session location' }, { status: 502 })
+    }
 
-    return NextResponse.json({ sdpAnswer, sessionUrl })
+    return NextResponse.json({ sdpAnswer, sessionId })
   } catch (error) {
     console.error('Stream error:', error)
     return NextResponse.json(
@@ -55,16 +59,22 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const { sessionUrl } = await request.json()
-    if (!sessionUrl) {
-      return NextResponse.json({ error: 'Missing sessionUrl' }, { status: 400 })
+    const { sessionId } = await request.json()
+    if (typeof sessionId !== 'string' || !sessionId) {
+      return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
+    const sessionUrl = takeStreamSession(sessionId)
+    if (!sessionUrl) {
+      return NextResponse.json({ error: 'Unknown stream session' }, { status: 404 })
+    }
     const token = await getAccessToken()
-    await fetch(sessionUrl, {
+    const response = await fetch(sessionUrl, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
+      redirect: 'manual',
     })
+    if (!response.ok) return NextResponse.json({ error: 'Ring could not close the stream session' }, { status: 502 })
 
     return NextResponse.json({ success: true })
   } catch (error) {
