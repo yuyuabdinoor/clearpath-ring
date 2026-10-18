@@ -2,6 +2,8 @@
 
 ClearPath checks whether a resident-defined entrance zone visibly overlaps a parcel or other movable object in a fresh Ring frame. It is a hackathon prototype, not an accessibility or safety certification. This project builds on the Ring API Hello World sample below.
 
+The [evaluation and reference plan](docs/evaluation-and-reference.md) defines 16 visual cases to run before claiming detection reliability and records the specific Frigate design ideas being studied. Its cases are pending; they are not results.
+
 ### Test without a Ring device or model key
 
 Run `npm install` and `npm run dev`, then open `http://localhost:3000`. The app starts in **Sample test** mode. Pick Clear route, Obstructed, Low confidence, No camera, or Removed; drag on the synthetic entrance to define your own blue access zone. The amber parcel boundary is a supplied test input, not AI detection. This exercises the UI, normalized coordinates, overlap calculation, and decision states—but not live Ring capture or model localization. Run `npm test` (Node 22.18+ required) for deterministic decision checks.
