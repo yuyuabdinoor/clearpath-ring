@@ -10,7 +10,7 @@ const policy = {
   minimumOverlapRatio: 0.1,
   maximumEvidenceAgeMs: 60_000,
 }
-const evidence = { observedAt: now, cameraAvailable: true, object, objectConfidence: 0.95, occluded: false }
+const evidence = { observedAt: now, cameraAvailable: true, object, objectConfidence: 0.95, occluded: false, zoneClearVerified: true }
 
 test('sample parcel inside zone is an obstruction', () => {
   const result = decideAccessState(evidence, policy, now)
@@ -36,4 +36,17 @@ test('simulated removal needs fresh, confident evidence', () => {
   assert.equal(decideAccessState({ ...evidence, object: null }, policy, now).state, 'zone_clear')
   assert.equal(decideAccessState({ ...evidence, object: null, objectConfidence: 0 }, policy, now).state, 'review_needed')
   assert.equal(decideAccessState({ ...evidence, object: null }, policy, now + 60_001).state, 'review_needed')
+})
+
+test('outside object cannot prove entire zone clear by itself', () => {
+  const outsidePolicy = { ...policy, protectedZone: { x: 0.25, y: 0.55, width: 0.25, height: 0.35 } }
+  assert.equal(decideAccessState({ ...evidence, zoneClearVerified: false }, outsidePolicy, now).state, 'review_needed')
+  assert.equal(decideAccessState({ ...evidence, object: null, zoneClearVerified: false }, policy, now).state, 'review_needed')
+})
+
+test('partial overlap below obstruction threshold requires review', () => {
+  const edgePolicy = { ...policy, protectedZone: { x: 0.728, y: 0.55, width: 0.2, height: 0.35 } }
+  const result = decideAccessState(evidence, edgePolicy, now)
+  assert.equal(result.state, 'review_needed')
+  assert.ok(result.overlapRatio > 0 && result.overlapRatio < policy.minimumOverlapRatio)
 })

@@ -13,8 +13,15 @@ export const localizationSchema = z.object({
   }).nullable(),
   confidence: z.number().finite().min(0).max(1),
   occluded: z.boolean(),
+  zoneClearVerified: z.boolean(),
   frameTimestamp: z.number().int().positive(),
 }).superRefine((value, context) => {
+  if (value.zoneClearVerified && (value.status === 'uncertain' || value.occluded)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['zoneClearVerified'], message: 'An uncertain or occluded zone cannot be verified clear.' })
+  }
+  if (value.status === 'none' && !value.zoneClearVerified) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['zoneClearVerified'], message: 'No-object classification requires a full-zone clear check.' })
+  }
   if (value.status === 'object' && !value.bounds) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['bounds'], message: 'An object requires bounds.' })
   }

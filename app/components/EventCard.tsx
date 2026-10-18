@@ -5,6 +5,7 @@ import { memo } from 'react'
 export interface DetectionEvent {
   event_id: string
   event_type: string
+  device_id?: string | null
   timestamp: string
   confidence: number | null
   bounding_box: { x: number; y: number; width: number; height: number } | null

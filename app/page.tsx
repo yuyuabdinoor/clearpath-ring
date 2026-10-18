@@ -17,6 +17,7 @@ import {
 } from '@/lib/clearpath/decision'
 import { LocalizationResult, validateLocalization } from '@/lib/clearpath/localization'
 import { assessmentForZone, withZone, ProtectedZones, ZoneAssessment } from '@/lib/clearpath/zone-assessment'
+import { isRelevantMotionEvent } from '@/lib/clearpath/motion-events'
 
 type RightPanelTab = 'events' | 'processors'
 type AuthMode = 'access_token' | 'refresh_token' | null
@@ -67,11 +68,19 @@ export default function Dashboard() {
   const [liveAssessment, setLiveAssessment] = useState<ZoneAssessment<LocalizationResult> | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [rechecking, setRechecking] = useState(false)
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false)
+  const [alertStatus, setAlertStatus] = useState<string | null>(null)
+  const [motionEvent, setMotionEvent] = useState<{ receivedAt: number; simulated: boolean } | null>(null)
   const [now, setNow] = useState(Date.now())
   const [videoViewport, setVideoViewport] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [captureError, setCaptureError] = useState<string | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const analysisGenerationRef = useRef(0)
+  const obstructionObservedAtRef = useRef<number | null>(null)
+  const lastAlertedFrameRef = useRef(0)
+  const pageOpenedAtRef = useRef(Date.now())
+  const seenEventIdsRef = useRef(new Set<string>())
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
@@ -143,6 +152,17 @@ export default function Dashboard() {
   // Custom hooks
   const { streamActive, streamError, startStream, stopStream } = useWebRTCStream({ videoRef, deviceId })
   const { events, connected } = useEventStream({})
+
+  useEffect(() => {
+    if (!deviceId) return
+    for (const event of events) {
+      if (seenEventIdsRef.current.has(event.event_id)) continue
+      seenEventIdsRef.current.add(event.event_id)
+      if (isRelevantMotionEvent(event, deviceId, pageOpenedAtRef.current)) {
+        setMotionEvent({ receivedAt: Date.now(), simulated: event.metadata?.simulated === true })
+      }
+    }
+  }, [deviceId, events])
   const { processors, results, toggleProcessor, enabledCount } = useVideoProcessing({
     video: videoRef.current,
     canvas: canvasRef.current,
@@ -163,22 +183,34 @@ export default function Dashboard() {
   const protectedZone = sourceMode === 'sample' ? sampleZone : ringZone
   const localization = assessmentForZone(liveAssessment, ringZone)
 
-  const decision = useMemo(() => decideAccessState({
+  const decision = useMemo(() => {
+    if (cameraAvailable && streamActive && motionEvent && (!localization || localization.frameTimestamp <= motionEvent.receivedAt)) {
+      return {
+        state: 'review_needed' as const,
+        overlapRatio: null,
+        reason: 'New entrance activity occurred after the last analysis. Capture and analyze a fresh frame before relying on the route state.',
+        observedAt: localization?.frameTimestamp ?? 0,
+      }
+    }
+    return decideAccessState({
     observedAt: localization?.frameTimestamp ?? 0,
     cameraAvailable: cameraAvailable && streamActive,
     object: localization?.status === 'object' ? localization.bounds : null,
     objectConfidence: localization?.status === 'uncertain' || localization?.category === 'unknown' ? 0 : localization?.confidence ?? 0,
     occluded: occluded || localization?.occluded === true,
+    zoneClearVerified: localization?.zoneClearVerified === true,
   }, {
     protectedZone: ringZone,
     minimumObjectConfidence: 0.7,
     minimumOverlapRatio: 0.1,
     maximumEvidenceAgeMs: 60_000,
-  }, now), [cameraAvailable, localization, now, occluded, ringZone, streamActive])
+  }, now)
+  }, [cameraAvailable, localization, motionEvent, now, occluded, ringZone, streamActive])
 
   const debugDecision = useMemo(() => decideAccessState({
     observedAt, cameraAvailable: cameraAvailable && streamActive, object: objectBox,
     objectConfidence, occluded,
+    zoneClearVerified: true,
   }, {
     protectedZone: ringZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
   }, now), [cameraAvailable, objectBox, objectConfidence, observedAt, occluded, ringZone, streamActive, now])
@@ -189,11 +221,42 @@ export default function Dashboard() {
     object: sampleCase === 'removed' ? null : sampleObject,
     objectConfidence: sampleCase === 'review' ? 0.45 : 0.95,
     occluded: false,
+    zoneClearVerified: true,
   }, {
     protectedZone: sampleZone, minimumObjectConfidence: 0.7, minimumOverlapRatio: 0.1, maximumEvidenceAgeMs: 60_000,
   }, now), [sampleObservedAt, sampleCase, sampleZone, now])
   const activeDecision = sourceMode === 'sample' ? sampleDecision : decision
   const presentation = statePresentation[activeDecision.state]
+
+  useEffect(() => {
+    if (sourceMode !== 'ring' || !localization || decision.observedAt <= lastAlertedFrameRef.current) return
+    if (decision.state === 'obstruction_detected') {
+      lastAlertedFrameRef.current = decision.observedAt
+      if (obstructionObservedAtRef.current !== null) return
+      obstructionObservedAtRef.current = decision.observedAt
+      setAlertStatus(`An object was detected in your access zone at ${new Date(decision.observedAt).toLocaleTimeString()}. Check the live view and arrange help if needed.`)
+      if (notificationsEnabled && Notification.permission === 'granted') {
+        new Notification('Entry access may be blocked', { body: 'A fresh Ring frame shows an object overlapping your access zone.' })
+      }
+    } else if (decision.state === 'zone_clear' && obstructionObservedAtRef.current !== null && decision.observedAt > obstructionObservedAtRef.current) {
+      lastAlertedFrameRef.current = decision.observedAt
+      obstructionObservedAtRef.current = null
+      setAlertStatus('A fresh recheck shows no material obstruction in the access zone. This does not certify the route is safe.')
+      if (notificationsEnabled && Notification.permission === 'granted') {
+        new Notification('Entry zone looks clear on recheck', { body: 'A newer Ring frame shows no material obstruction in the defined zone.' })
+      }
+    }
+  }, [decision, localization, notificationsEnabled, sourceMode])
+
+  const enableNotifications = async () => {
+    if (!('Notification' in window)) {
+      setAlertStatus('This browser does not support desktop notifications. In-app alerts will still appear here.')
+      return
+    }
+    const permission = await Notification.requestPermission()
+    setNotificationsEnabled(permission === 'granted')
+    if (permission !== 'granted') setAlertStatus('Desktop notifications were not enabled. In-app alerts will still appear here.')
+  }
 
   const selectSampleCase = (next: SampleCase) => {
     setSampleCase(next)
@@ -233,6 +296,9 @@ export default function Dashboard() {
       } else {
         analysisGenerationRef.current += 1
         setLiveAssessment(null)
+        obstructionObservedAtRef.current = null
+        setAlertStatus(null)
+        setMotionEvent(null)
         setZones(current => withZone(current, 'ring', rect))
       }
     }
@@ -242,11 +308,33 @@ export default function Dashboard() {
     }
   }
 
-  const captureFrame = () => {
+  const captureFreshFrame = async (): Promise<CapturedFrame | null> => {
     const video = videoRef.current
-    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
+    if (!streamActive || !video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
       setCaptureError('Start the Ring stream and wait for a usable video frame.')
-      return
+      return null
+    }
+
+    if (!video.requestVideoFrameCallback) {
+      setCaptureError('This browser cannot verify that a new Ring frame arrived. Try a browser with video-frame callbacks.')
+      return null
+    }
+
+    // A capture is fresh only after the video element actually presents another frame.
+    const capturedAt = await new Promise<number | null>((resolve) => {
+      let handle = 0
+      const timeout = window.setTimeout(() => {
+        video.cancelVideoFrameCallback(handle)
+        resolve(null)
+      }, 3_000)
+      handle = video.requestVideoFrameCallback(() => {
+        window.clearTimeout(timeout)
+        resolve(Date.now())
+      })
+    })
+    if (capturedAt === null || videoRef.current !== video || !streamActive) {
+      setCaptureError('No new Ring video frame arrived. The stream may be stalled; restart it and retry.')
+      return null
     }
 
     const captureCanvas = document.createElement('canvas')
@@ -255,33 +343,38 @@ export default function Dashboard() {
     const context = captureCanvas.getContext('2d')
     if (!context) {
       setCaptureError('The browser could not create a frame-capture context.')
-      return
+      return null
     }
 
     context.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height)
-    captureCanvas.toBlob((blob) => {
-      if (!blob) {
-        setCaptureError('The current Ring frame could not be captured.')
-        return
-      }
-
-      const capturedAt = Date.now()
-      const url = URL.createObjectURL(blob)
-      setCapturedFrame((previous) => {
-        if (previous) URL.revokeObjectURL(previous.url)
-        return { url, blob, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
-      })
-      analysisGenerationRef.current += 1
-      setLiveAssessment(null)
-      setAnalysisError(null)
-      setObservedAt(capturedAt)
-      setCaptureError(null)
-    }, 'image/jpeg', 0.9)
+    const blob = await new Promise<Blob | null>((resolve) => captureCanvas.toBlob(resolve, 'image/jpeg', 0.9))
+    if (!blob) {
+      setCaptureError('The current Ring frame could not be captured.')
+      return null
+    }
+    return { url: URL.createObjectURL(blob), blob, capturedAt, width: captureCanvas.width, height: captureCanvas.height }
   }
 
-  const analyzeFrame = async () => {
-    if (!capturedFrame || analyzing) return
-    if (Date.now() - capturedFrame.capturedAt > 60_000) {
+  const storeFrame = (frame: CapturedFrame) => {
+    setCapturedFrame((previous) => {
+      if (previous) URL.revokeObjectURL(previous.url)
+      return frame
+    })
+    analysisGenerationRef.current += 1
+    setLiveAssessment(null)
+    setAnalysisError(null)
+    setObservedAt(frame.capturedAt)
+    setCaptureError(null)
+  }
+
+  const captureFrame = async () => {
+    const frame = await captureFreshFrame()
+    if (frame) storeFrame(frame)
+  }
+
+  const analyzeFrame = async (frame: CapturedFrame | null = capturedFrame) => {
+    if (!frame || analyzing) return
+    if (Date.now() - frame.capturedAt > 60_000) {
       setAnalysisError('This frame is older than 60 seconds. Capture a fresh frame.')
       return
     }
@@ -289,8 +382,8 @@ export default function Dashboard() {
     setAnalysisError(null)
     const generation = ++analysisGenerationRef.current
     const form = new FormData()
-    form.append('frame', capturedFrame.blob, 'ring-frame.jpg')
-    form.append('capturedAt', String(capturedFrame.capturedAt))
+    form.append('frame', frame.blob, 'ring-frame.jpg')
+    form.append('capturedAt', String(frame.capturedAt))
     form.append('zone', JSON.stringify(ringZone))
     try {
       const response = await fetch('/api/clearpath/localize', { method: 'POST', body: form })
@@ -306,6 +399,19 @@ export default function Dashboard() {
       setAnalysisError(error instanceof Error ? error.message : 'Frame analysis failed.')
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  const recheckFrame = async () => {
+    if (rechecking || analyzing) return
+    setRechecking(true)
+    try {
+      const frame = await captureFreshFrame()
+      if (!frame) return
+      storeFrame(frame)
+      await analyzeFrame(frame)
+    } finally {
+      setRechecking(false)
     }
   }
 
@@ -467,13 +573,30 @@ export default function Dashboard() {
             )}
           </section>
 
+          {sourceMode === 'sample' && (sampleDecision.state === 'obstruction_detected' || (sampleCase === 'removed' && sampleDecision.state === 'zone_clear')) && <section className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-200">Synthetic alert preview · not sent</p>
+            <p className="mt-2 text-sm text-slate-100">{sampleCase === 'removed' ? 'Fresh example frame: the defined access zone looks clear. A real removal update would require a newer Ring frame.' : 'An object appears to block your access zone. Check the entrance and arrange help if needed.'}</p>
+          </section>}
+
+          {sourceMode === 'ring' && <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+            <p className="text-sm font-semibold text-white">Resident alert and recheck</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">After a manual analysis, a confirmed obstruction appears here. Desktop alerts work only while this page is open and you opt in; they do not contact the courier.</p>
+            {motionEvent && (!localization || localization.frameTimestamp <= motionEvent.receivedAt) && <p role="status" className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">{motionEvent.simulated ? 'Simulated motion event' : 'New camera motion event'}: the earlier assessment is no longer current. Use a fresh recheck.</p>}
+            {alertStatus && <p role="status" className="mt-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-100">{alertStatus}</p>}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button onClick={enableNotifications} disabled={notificationsEnabled} className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-200 disabled:text-slate-400">{notificationsEnabled ? 'Desktop alerts enabled' : 'Enable desktop alerts'}</button>
+              <button onClick={recheckFrame} disabled={!streamActive || analyzing || rechecking} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:bg-slate-700 disabled:text-slate-400">{rechecking ? 'Rechecking…' : 'Recheck with fresh frame'}</button>
+            </div>
+            <p className="mt-2 text-xs text-slate-400">A clear recheck updates the alert only when a newer frame supports it. Uncertain or unavailable evidence cannot confirm removal.</p>
+          </section>}
+
           {sourceMode === 'ring' && <section className="mt-4 rounded-xl border border-slate-700 bg-slate-900/70 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-white">Ring evidence</p>
                 <p className="mt-1 text-xs text-slate-400">Captured locally from the active WHEP video element.</p>
               </div>
-              <button onClick={captureFrame} disabled={!streamActive} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">Capture frame</button>
+              <button onClick={captureFrame} disabled={!streamActive || analyzing || rechecking} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">Capture frame</button>
             </div>
             {captureError && <p className="mt-3 text-xs text-rose-300">{captureError}</p>}
             {capturedFrame && (
@@ -486,7 +609,7 @@ export default function Dashboard() {
                 </div>
               </div>
             )}
-            {capturedFrame && <button onClick={analyzeFrame} disabled={analyzing || !streamActive} className="mt-3 rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">{analyzing ? 'Analyzing…' : 'Analyze captured frame'}</button>}
+            {capturedFrame && <button onClick={() => void analyzeFrame()} disabled={analyzing || rechecking || !streamActive} className="mt-3 rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500">{analyzing ? 'Analyzing…' : 'Analyze captured frame'}</button>}
             {analysisError && <p className="mt-2 text-xs text-amber-300">{analysisError}</p>}
             {localization && <p className="mt-2 text-xs text-slate-300">Model result: {localization.status} · {Math.round(localization.confidence * 100)}% confidence. Frame sent for analysis; raw image is not saved by ClearPath.</p>}
           </section>}

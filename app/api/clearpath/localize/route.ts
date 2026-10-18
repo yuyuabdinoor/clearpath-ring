@@ -21,8 +21,9 @@ const responseFormat = {
       ] },
       confidence: { type: 'number' },
       occluded: { type: 'boolean' },
+      zoneClearVerified: { type: 'boolean' },
     },
-    required: ['status', 'category', 'bounds', 'confidence', 'occluded'],
+    required: ['status', 'category', 'bounds', 'confidence', 'occluded', 'zoneClearVerified'],
   },
 } as const
 
@@ -63,7 +64,7 @@ export async function POST(request: NextRequest) {
         model: process.env.CLEARPATH_VISION_MODEL || 'gpt-4o',
         store: false,
         input: [{ role: 'user', content: [
-          { type: 'input_text', text: `Inspect this Ring entrance frame. Protected zone in normalized full-frame coordinates: ${zone}. Localize the most relevant visible parcel or movable obstruction, even if outside the zone. Return status "object" and one tight normalized box if reliably visible. Return "none" only if the entire protected zone is visible and you can confidently see no movable obstruction there. Return "uncertain" for occlusion, poor image quality, ambiguity, or incomplete visibility. Confidence expresses your certainty in this classification, not a calibrated probability. Do not identify people or infer accessibility compliance.` },
+          { type: 'input_text', text: `Inspect this Ring entrance frame. Protected zone in normalized full-frame coordinates: ${zone}. Examine the entire protected zone for every parcel or movable obstruction. If one or more objects overlap it, localize the most relevant overlapping object with a tight normalized box. If no object overlaps it but an object is visible elsewhere, you may localize that object. Set zoneClearVerified true only when the entire protected zone is visibly unobstructed, including checking for additional objects besides the localized one. Otherwise set it false. Return status "none" only when zoneClearVerified is true and no movable object is localized. Return "uncertain" for occlusion, poor image quality, ambiguity, incomplete zone visibility, or uncertainty about additional objects. Confidence expresses certainty in this classification, not a calibrated probability. Do not identify people or infer accessibility compliance.` },
           { type: 'input_image', image_url: `data:image/jpeg;base64,${base64}`, detail: 'high' },
         ] }],
         text: { format: responseFormat },

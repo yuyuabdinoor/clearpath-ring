@@ -17,6 +17,7 @@ export type VisualEvidence = {
   object: NormalizedRect | null
   objectConfidence: number
   occluded: boolean
+  zoneClearVerified?: boolean
 }
 
 export type AccessPolicy = {
@@ -88,6 +89,13 @@ export function decideAccessState(
         observedAt: evidence.observedAt,
       }
     }
+    if (!evidence.zoneClearVerified) {
+      return {
+        state: 'review_needed', overlapRatio: null,
+        reason: 'The entire protected zone has not been verified clear.',
+        observedAt: evidence.observedAt,
+      }
+    }
     return {
       state: 'zone_clear',
       overlapRatio: 0,
@@ -115,6 +123,22 @@ export function decideAccessState(
       state: 'obstruction_detected',
       overlapRatio,
       reason: 'A newly visible object materially overlaps the resident-defined access zone.',
+      observedAt: evidence.observedAt,
+    }
+  }
+
+  if (overlapRatio > 0) {
+    return {
+      state: 'review_needed', overlapRatio,
+      reason: 'An object partly overlaps the access zone, below the obstruction threshold.',
+      observedAt: evidence.observedAt,
+    }
+  }
+
+  if (!evidence.zoneClearVerified) {
+    return {
+      state: 'review_needed', overlapRatio,
+      reason: 'This object is outside the zone, but the entire zone has not been verified clear.',
       observedAt: evidence.observedAt,
     }
   }
