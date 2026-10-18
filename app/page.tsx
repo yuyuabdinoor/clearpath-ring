@@ -56,7 +56,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [drawMode, setDrawMode] = useState<DrawMode>('zone')
   const [zones, setZones] = useState<ProtectedZones>({
-    sample: { x: 0.18, y: 0.5, width: 0.38, height: 0.42 },
+    sample: obstructedZone,
     ring: { x: 0.18, y: 0.5, width: 0.38, height: 0.42 },
   })
   const [objectBox, setObjectBox] = useState<NormalizedRect | null>(null)
